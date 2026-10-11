@@ -12,6 +12,7 @@ mod rules;
 // Removed by #7, which wires state into `run`.
 #[allow(dead_code)]
 mod state;
+mod status;
 
 // #7 wires the feedback into run and removes this allow.
 #[allow(dead_code)]
@@ -42,6 +43,7 @@ fn main() {
             eprint!("{USAGE}");
             125
         }
+        Ok(Some(Value(v))) if v == "status" => status::run(&mut parser),
         Ok(Some(arg)) => {
             let name = match arg {
                 Value(v) => v.to_string_lossy().into_owned(),
