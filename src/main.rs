@@ -1,22 +1,14 @@
 use lexopt::prelude::*;
 
-// #7 wires the queue into run and removes this allow.
-#[allow(dead_code)]
-mod queue;
-// Removed by #7, which wires config into `run`.
-#[allow(dead_code)]
 mod config;
+mod feedback;
+mod queue;
 // #11 wires rules into the shims and removes this allow.
 #[allow(dead_code)]
 mod rules;
-// Removed by #7, which wires state into `run`.
-#[allow(dead_code)]
+mod run;
 mod state;
 mod status;
-
-// #7 wires the feedback into run and removes this allow.
-#[allow(dead_code)]
-mod feedback;
 
 const USAGE: &str = "\
 usage: henesys <command>
@@ -39,6 +31,14 @@ fn main() {
             print!("{USAGE}");
             0
         }
+        Ok(Some(Value(v))) if v == "run" => match run::parse(&mut parser) {
+            Ok(opts) => run::run(opts),
+            Err(e) => {
+                eprintln!("henesys: {e}");
+                eprint!("{}", run::USAGE);
+                125
+            }
+        },
         Ok(None) => {
             eprint!("{USAGE}");
             125

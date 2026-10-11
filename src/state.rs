@@ -90,6 +90,8 @@ impl State {
         Ok((decision, snap))
     }
 
+    // #9 status reads this; nothing in run needs a snapshot without admission.
+    #[allow(dead_code)]
     pub fn snapshot(&self) -> Result<Snapshot, String> {
         let _m = self.lock_mutex()?;
         self.sweep()
