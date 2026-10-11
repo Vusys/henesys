@@ -224,15 +224,13 @@ henesys run -w 2 -- nice -n 10 npm run build
 
 ## Sharing a budget between Unix users
 
-Point `HENESYS_DIR` at a shared directory. Every user of the budget must use the same directory, the same `umask 002`, and the same group.
+Create the shared directory with group write and the setgid bit, then point `HENESYS_DIR` at it. Every user of the budget must be in the same group.
 
 ```
-sudo install -d -m 2770 -g <group> /srv/henesys /srv/henesys/wait /srv/henesys/held
+sudo install -d -m 2770 -g <group> /srv/henesys
 ```
 
-Pre-create `wait` and `held` as shown. henesys creates them with mode 0700 if they are missing, and other users then cannot queue.
-
-Every user needs `umask 002` in their shell (for example `umask 002` in `~/.profile`, or `umask 002` in fish's `config.fish`). Otherwise the first user to run henesys creates `.mutex` as mode 0644, and other users fail with `Permission denied`. Each user then sets `HENESYS_DIR=/srv/henesys`.
+henesys creates `wait`, `held`, `.mutex` and `VERSION` inside it and gives them the directory's group permissions, so your umask does not matter. Each user sets `HENESYS_DIR=/srv/henesys`.
 
 ## Reference
 

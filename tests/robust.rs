@@ -1,5 +1,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc;
@@ -284,6 +286,108 @@ fn version_mismatch_exits_125() {
         "{}",
         stderr(&out)
     );
+}
+
+// Runs henesys as `uid` (None: this user) with umask 022 and the shared state dir, inside group `gid`.
+#[cfg(target_os = "linux")]
+fn as_user(uid: Option<u32>, gid: u32, root: &Path, args: &[&str]) -> Command {
+    let mut argv: Vec<String> = match uid {
+        Some(uid) => vec![
+            "sudo".into(),
+            "-n".into(),
+            "setpriv".into(),
+            format!("--reuid={uid}"),
+            format!("--regid={gid}"),
+            format!("--groups={gid}"),
+        ],
+        None => Vec::new(),
+    };
+    argv.extend([
+        "env".into(),
+        "-u".into(),
+        "HENESYS_HELD".into(),
+        "-u".into(),
+        "HENESYS_DISABLE".into(),
+        format!("HENESYS_DIR={}", root.join("shared").display()),
+        "HENESYS_SLOTS=1".into(),
+        format!("HENESYS_CONFIG={}", root.join("none.toml").display()),
+        // A waiter that never gets a slot exits 75 instead of hanging the test run.
+        "HENESYS_MAX_WAIT=30".into(),
+        "sh".into(),
+        "-c".into(),
+        "umask 022; exec \"$@\"".into(),
+        "sh".into(),
+        root.join("henesys").display().to_string(),
+    ]);
+    argv.extend(args.iter().map(|a| a.to_string()));
+    let mut c = Command::new(&argv[0]);
+    c.args(&argv[1..])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    c
+}
+
+#[cfg(target_os = "linux")]
+fn status_as(uid: Option<u32>, gid: u32, root: &Path) -> serde_json::Value {
+    let out = output(&mut as_user(uid, gid, root, &["status", "--json"]));
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+// Needs passwordless sudo and setpriv (Linux); skipped (not failed) without sudo, as on CI.
+#[cfg(target_os = "linux")]
+#[test]
+fn shared_dir_works_for_a_second_user() {
+    if !Command::new("sudo")
+        .args(["-n", "true"])
+        .status()
+        .is_ok_and(|s| s.success())
+    {
+        eprintln!("skipped: needs passwordless sudo");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // uid 65534 must reach the binary and the state dir, so open the test's private tempdir up.
+    fs::set_permissions(root, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_henesys"), root.join("henesys")).unwrap();
+    fs::set_permissions(root.join("henesys"), fs::Permissions::from_mode(0o755)).unwrap();
+    let shared = root.join("shared");
+    fs::create_dir(&shared).unwrap();
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o2770)).unwrap();
+    let gid = rustix::process::getegid().as_raw();
+    let second = Some(65534);
+
+    let out = output(&mut as_user(None, gid, root, &["run", "--", "true"]));
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let out = output(&mut as_user(second, gid, root, &["run", "--", "true"]));
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let mut holder = as_user(None, gid, root, &["run", "--", "sleep", "3"])
+        .spawn()
+        .unwrap();
+    // The second member sees the first member's holder in the shared state.
+    wait_until(Duration::from_secs(10), "first user's holder", || {
+        status_as(second, gid, root)["holders"]
+            .as_array()
+            .unwrap()
+            .len()
+            == 1
+    });
+    let waiter = as_user(second, gid, root, &["run", "--", "true"])
+        .spawn()
+        .unwrap();
+    wait_until(Duration::from_secs(10), "second user in line", || {
+        status_as(second, gid, root)["waiters"]
+            .as_array()
+            .unwrap()
+            .len()
+            == 1
+    });
+    let waiter = waiter.wait_with_output().unwrap();
+    assert_eq!(waiter.status.code(), Some(0), "{}", stderr(&waiter));
+    assert!(holder.wait().unwrap().success());
 }
 
 #[test]

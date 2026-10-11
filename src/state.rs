@@ -1,6 +1,6 @@
 use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Seek, SeekFrom, Write};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,6 +10,8 @@ const PROTOCOL: &str = "1";
 
 pub struct State {
     dir: PathBuf,
+    // The state dir's mode when it is group-shared; new paths inherit its bits.
+    shared: Option<u32>,
 }
 
 // The file stays locked until dropped; that lock is the entry's liveness.
@@ -26,26 +28,44 @@ pub struct Snapshot {
 
 impl State {
     pub fn open(dir: PathBuf) -> Result<State, String> {
-        for sub in ["", "wait", "held"] {
-            let path = dir.join(sub);
-            DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&path)
-                .map_err(|e| io_err(&path, e))?;
-        }
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .map_err(|e| io_err(&dir, e))?;
         let uid = rustix::process::geteuid().as_raw();
         // Only the predictable /tmp fallback can be planted by another user; a shared HENESYS_DIR is group-owned.
         if dir == Path::new(&format!("/tmp/henesys-{uid}")) {
             check_owner(&dir, uid)?;
         }
-        let state = State { dir };
+        // A group-shared dir (`install -d -m 2770`) lends its bits to everything henesys creates inside it.
+        let root = fs::metadata(&dir).map_err(|e| io_err(&dir, e))?.mode() & 0o7777;
+        let shared = (root & 0o070 != 0).then_some(root);
+        for sub in ["wait", "held"] {
+            let path = dir.join(sub);
+            match DirBuilder::new().mode(0o700).create(&path) {
+                Ok(()) => share(&path, shared, 0o2770)?,
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(io_err(&path, e)),
+            }
+        }
+        let state = State { dir, shared };
+        // Locking needs no write access, so .mutex is created once here and only opened read-only after.
+        let mutex = state.dir.join(".mutex");
+        match OpenOptions::new().write(true).create_new(true).open(&mutex) {
+            Ok(_) => share(&mutex, shared, 0o660)?,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(io_err(&mutex, e)),
+        }
         let _m = state.lock_mutex()?;
         let version = state.dir.join("VERSION");
         // Written whole under the mutex, then renamed, so a crash never leaves a half-written VERSION.
         if !version.exists() {
             let tmp = state.dir.join("VERSION.tmp");
+            // A crash may have left a tmp the group cannot write; clear it first.
+            let _ = fs::remove_file(&tmp);
             fs::write(&tmp, "1\n").map_err(|e| io_err(&tmp, e))?;
+            share(&tmp, shared, 0o660)?;
             fs::rename(&tmp, &version).map_err(|e| io_err(&version, e))?;
         }
         let v = fs::read_to_string(&version).map_err(|e| io_err(&version, e))?;
@@ -67,6 +87,7 @@ impl State {
             .create_new(true)
             .open(&path)
             .map_err(|e| io_err(&path, e))?;
+        share(&path, self.shared, 0o640)?;
         // Locked before the mutex drops, so a sweeper never sees it unlocked.
         file.lock().map_err(|e| io_err(&path, e))?;
         let mut t = Ticket { file, path, entry };
@@ -119,12 +140,7 @@ impl State {
     // Held for one read or change of wait/ and held/; never across a command or a sleep.
     fn lock_mutex(&self) -> Result<File, String> {
         let path = self.dir.join(".mutex");
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|e| io_err(&path, e))?;
+        let file = File::open(&path).map_err(|e| io_err(&path, e))?;
         file.lock().map_err(|e| io_err(&path, e))?;
         Ok(file)
     }
@@ -179,6 +195,14 @@ fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+// Gives a path henesys just created the shared dir's bits, masked; the umask would strip group write. No-op when private.
+fn share(path: &Path, shared: Option<u32>, mask: u32) -> Result<(), String> {
+    let Some(root) = shared else {
+        return Ok(());
+    };
+    fs::set_permissions(path, fs::Permissions::from_mode(root & mask)).map_err(|e| io_err(path, e))
 }
 
 fn check_owner(dir: &Path, uid: u32) -> Result<(), String> {
