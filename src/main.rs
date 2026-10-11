@@ -1,12 +1,15 @@
+use std::env;
+use std::ffi::OsString;
+use std::path::Path;
+
 use lexopt::prelude::*;
 
 mod config;
 mod feedback;
 mod queue;
-// #11 wires rules into the shims and removes this allow.
-#[allow(dead_code)]
 mod rules;
 mod run;
+mod shim;
 mod state;
 mod status;
 
@@ -21,6 +24,14 @@ commands:
 
 // 125 is henesys's own error code; see the frozen exit codes in #1.
 fn main() {
+    // A shim is a symlink named after the tool; everything but `henesys` itself is one.
+    let mut argv = env::args_os();
+    let argv0 = argv.next().unwrap_or_default();
+    let name = Path::new(&argv0).file_name().unwrap_or_default();
+    if name != "henesys" {
+        let args: Vec<OsString> = argv.collect();
+        std::process::exit(shim::run(name, args));
+    }
     let mut parser = lexopt::Parser::from_env();
     let code = match parser.next() {
         Ok(Some(Long("version"))) => {
@@ -44,6 +55,7 @@ fn main() {
             125
         }
         Ok(Some(Value(v))) if v == "status" => status::run(&mut parser),
+        Ok(Some(Value(v))) if v == "shim" => shim::install_cmd(&mut parser),
         Ok(Some(arg)) => {
             let name = match arg {
                 Value(v) => v.to_string_lossy().into_owned(),

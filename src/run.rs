@@ -196,7 +196,7 @@ fn exit_code(status: ExitStatus) -> i32 {
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
 }
 
-fn spawn_failed(program: &OsStr, e: &io::Error) -> i32 {
+pub fn spawn_failed(program: &OsStr, e: &io::Error) -> i32 {
     let name = program.to_string_lossy();
     if e.kind() == io::ErrorKind::NotFound {
         eprintln!("henesys: {name}: command not found");
