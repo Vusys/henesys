@@ -32,6 +32,9 @@ jobs:
       - if: matrix.setup != ''
         run: ${{ matrix.setup }}
       - run: cargo build --release --locked --target ${{ matrix.target }}
+      # Apple Silicon refuses unsigned arm64 binaries; strip can drop the linker's signature
+      - if: contains(matrix.target, 'apple')
+        run: codesign -v target/${{ matrix.target }}/release/henesys || codesign -s - --force target/${{ matrix.target }}/release/henesys
       - name: Package
         run: |
           if [ "$GITHUB_REF_TYPE" = tag ]; then VERSION="${GITHUB_REF_NAME#v}"; else VERSION=0.0.0-dev; fi
@@ -47,8 +50,37 @@ jobs:
           name: henesys-${{ matrix.target }}
           path: dist/*
 
-  release:
+  package:
     needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Render packaging
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then VERSION="${GITHUB_REF_NAME#v}"; else VERSION=0.0.0-dev; fi
+          sha() { cut -d' ' -f1 "dist/henesys-$1/henesys-$VERSION-$1.tar.gz.sha256"; }
+          SHA_X86_64=$(sha x86_64-unknown-linux-musl)
+          SHA_AARCH64=$(sha aarch64-unknown-linux-musl)
+          SHA_DARWIN_X86_64=$(sha x86_64-apple-darwin)
+          SHA_DARWIN_ARM64=$(sha aarch64-apple-darwin)
+          mkdir -p rendered
+          sed -e "s/@VER@/$VERSION/g" -e "s/@PKGVER@/${VERSION//-/}/" \
+            -e "s/@SHA_X86_64@/$SHA_X86_64/" -e "s/@SHA_AARCH64@/$SHA_AARCH64/" \
+            packaging/arch/PKGBUILD.in > rendered/PKGBUILD
+          sed -e "s/@VER@/$VERSION/g" \
+            -e "s/@SHA_DARWIN_X86_64@/$SHA_DARWIN_X86_64/" -e "s/@SHA_DARWIN_ARM64@/$SHA_DARWIN_ARM64/" \
+            packaging/homebrew/henesys.rb.in > rendered/henesys.rb
+          ! grep -n '@[A-Z_0-9]*@' rendered/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packaging
+          path: rendered/*
+
+  release:
+    needs: [build, package]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     env:
@@ -62,4 +94,25 @@ jobs:
         run: |
           PRERELEASE=
           case "$GITHUB_REF_NAME" in *-*) PRERELEASE=--prerelease ;; esac
-          gh release create "$GITHUB_REF_NAME" --generate-notes $PRERELEASE dist/*/*.tar.gz dist/*/*.sha256
+          gh release create "$GITHUB_REF_NAME" --generate-notes $PRERELEASE dist/*/*.tar.gz dist/*/*.sha256 dist/packaging/PKGBUILD
+
+  tap:
+    needs: [package, release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+      - uses: actions/download-artifact@v4
+        with:
+          name: packaging
+          path: packaging
+      - name: Commit formula to master
+        run: |
+          mkdir -p Formula
+          cp packaging/henesys.rb Formula/henesys.rb
+          git add Formula/henesys.rb
+          git -c user.name=Vusys -c user.email=bryan@vuii.co.uk \
+            commit -m "henesys ${GITHUB_REF_NAME#v} formula"
+          git push origin HEAD:master
