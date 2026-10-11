@@ -8,10 +8,7 @@ henesys is a foreground, blocking, first-come-first-served admission queue. The 
 [henesys] waiting 90s for 2 of 6 slots (5 busy), #2 in line. Running: web: npm run build (3 slots, 2m); api: npm test (2 slots, 14s). This is expected; it starts by itself. Do not re-run this command.
 ```
 
-It is for two situations:
-
-- Several AI coding agents or CI jobs on one box, each running test suites and browser tests. Without a queue the load average sits at 15–35, checks take 22 seconds or more, callers' timeouts expire, and the false failures cause re-runs that add more load.
-- A developer's work machine, where `npm run build` spikes every core and two builds plus an agent make everything stutter.
+It is for boxes where several AI coding agents or CI jobs each run test suites and browser tests. Without a queue the load average sits at 15–35, checks take 22 seconds or more, callers' timeouts expire, and the false failures cause re-runs that add more load.
 
 On a quiet box, nobody notices henesys is there.
 
