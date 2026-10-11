@@ -7,6 +7,10 @@ mod queue;
 #[allow(dead_code)]
 mod config;
 
+// #7 wires the feedback into run and removes this allow.
+#[allow(dead_code)]
+mod feedback;
+
 const USAGE: &str = "\
 usage: henesys <command>
 

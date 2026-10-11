@@ -9,8 +9,8 @@ repository = "https://github.com/Vusys/henesys"
 
 [dependencies]
 lexopt = "0.3.2"
-serde = { version = "1.0.229", features = ["derive"] }
 libc = "0.2.190"
+serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.8"
 
 [profile.release]
