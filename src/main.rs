@@ -3,6 +3,9 @@ use lexopt::prelude::*;
 // #7 wires the queue into run and removes this allow.
 #[allow(dead_code)]
 mod queue;
+// Removed by #7, which wires config into `run`.
+#[allow(dead_code)]
+mod config;
 
 const USAGE: &str = "\
 usage: henesys <command>

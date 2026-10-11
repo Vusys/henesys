@@ -10,6 +10,8 @@ repository = "https://github.com/Vusys/henesys"
 [dependencies]
 lexopt = "0.3.2"
 serde = { version = "1.0.229", features = ["derive"] }
+libc = "0.2.190"
+toml = "1.1.8"
 
 [profile.release]
 lto = true
@@ -17,3 +19,6 @@ codegen-units = 1
 panic = "abort"
 strip = true
 opt-level = "s"
+
+[dev-dependencies]
+tempfile = "3.27.0"
