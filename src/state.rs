@@ -327,8 +327,15 @@ mod tests {
         let path = crash(a);
         assert!(child.try_wait().unwrap().is_none());
         let fresh = State::open(s.dir.clone()).unwrap();
-        let snap = fresh.snapshot().unwrap();
-        assert!(snap.holders.is_empty());
+        // Other tests fork in parallel; a forked child holds the fd until its exec closes it, so allow a moment.
+        let swept = (0..50).any(|_| {
+            let empty = fresh.snapshot().unwrap().holders.is_empty();
+            if !empty {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            empty
+        });
+        assert!(swept);
         assert!(!path.exists());
         child.kill().unwrap();
         child.wait().unwrap();
