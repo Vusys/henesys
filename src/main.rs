@@ -9,6 +9,9 @@ mod config;
 // #11 wires rules into the shims and removes this allow.
 #[allow(dead_code)]
 mod rules;
+// Removed by #7, which wires state into `run`.
+#[allow(dead_code)]
+mod state;
 
 // #7 wires the feedback into run and removes this allow.
 #[allow(dead_code)]
