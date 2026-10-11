@@ -218,3 +218,22 @@ fn max_wait_gives_up_with_75() {
     assert!(stderr(&out).contains("gave up after"));
     assert_eq!(holder.join().unwrap().status.code(), Some(0));
 }
+
+// GNU timeout signals its whole process group, so a grandchild cannot outlive the limit. macOS has no timeout by default.
+#[cfg(target_os = "linux")]
+#[test]
+fn timeout_kills_grandchildren() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("marker");
+    let script = r#"(sleep 2; touch "$0") & wait"#;
+    let out = run_job(
+        dir.path(),
+        2,
+        &["timeout", "1", "sh", "-c", script, marker.to_str().unwrap()],
+    )
+    .output()
+    .unwrap();
+    assert_eq!(out.status.code(), Some(124));
+    thread::sleep(Duration::from_secs(2));
+    assert!(!marker.exists(), "grandchild outlived timeout");
+}
