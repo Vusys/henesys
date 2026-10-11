@@ -3,6 +3,7 @@ use std::ffi::{CStr, OsStr, OsString};
 use std::io;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, ExitStatus};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -173,7 +174,7 @@ fn queue_and_run(opts: RunOpts) -> Result<i32, String> {
         eprintln!("{line}");
     }
 
-    let result = command(&opts).env("HENESYS_HELD", "1").status();
+    let result = spawn_and_wait(command(&opts).env("HENESYS_HELD", "1"));
     state.release(ticket);
     Ok(match result {
         Ok(status) => exit_code(status),
@@ -188,6 +189,90 @@ fn command(opts: &RunOpts) -> Command {
         cmd.arg0(a0);
     }
     cmd
+}
+
+// The child's process group that `forward` signals; 0 means no child is running.
+static CHILD_PGID: AtomicI32 = AtomicI32::new(0);
+
+// Runs the child in its own process group so a signal to henesys can reach the whole tree.
+fn spawn_and_wait(cmd: &mut Command) -> io::Result<ExitStatus> {
+    // SAFETY: these only read the tty state of stdin.
+    let tty = unsafe { libc::isatty(0) } == 1
+        && unsafe { libc::tcgetpgrp(0) } == unsafe { libc::getpgrp() };
+    cmd.process_group(0);
+    if tty {
+        // SAFETY: give_tty only calls async-signal-safe functions.
+        unsafe {
+            cmd.pre_exec(|| {
+                give_tty(libc::getpid());
+                Ok(())
+            })
+        };
+    }
+    let saved = forward_signals();
+    let result = cmd.spawn().and_then(|mut child| {
+        let pid = child.id() as libc::pid_t;
+        CHILD_PGID.store(pid, Ordering::Relaxed);
+        if tty {
+            give_tty(pid);
+        }
+        let status = child.wait();
+        if tty {
+            // SAFETY: getpgrp cannot fail.
+            give_tty(unsafe { libc::getpgrp() });
+        }
+        status
+    });
+    CHILD_PGID.store(0, Ordering::Relaxed);
+    restore_signals(&saved);
+    result
+}
+
+extern "C" fn forward(sig: libc::c_int) {
+    let pgid = CHILD_PGID.load(Ordering::Relaxed);
+    if pgid != 0 {
+        // SAFETY: kill is async-signal-safe.
+        unsafe { libc::kill(-pgid, sig) };
+    }
+}
+
+// Installs `forward` on each forwarded signal the caller did not ignore. Returns the old actions.
+fn forward_signals() -> Vec<(libc::c_int, libc::sigaction)> {
+    let mut saved = Vec::new();
+    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
+        // SAFETY: zeroed sigaction structs are valid out-params and a valid handler is set.
+        unsafe {
+            let mut old: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(sig, std::ptr::null(), &mut old);
+            if old.sa_sigaction == libc::SIG_IGN {
+                continue;
+            }
+            let mut act: libc::sigaction = std::mem::zeroed();
+            act.sa_sigaction = forward as *const () as libc::sighandler_t;
+            act.sa_flags = libc::SA_RESTART;
+            libc::sigaction(sig, &act, std::ptr::null_mut());
+            saved.push((sig, old));
+        }
+    }
+    saved
+}
+
+fn restore_signals(saved: &[(libc::c_int, libc::sigaction)]) {
+    for (sig, old) in saved {
+        // SAFETY: `old` was filled in by sigaction above.
+        unsafe { libc::sigaction(*sig, old, std::ptr::null_mut()) };
+    }
+}
+
+// Makes `pgid` the foreground group of the tty. A background process may not touch the tty
+// without SIGTTOU, so it is ignored around the call; both sides call this to avoid a race.
+fn give_tty(pgid: libc::pid_t) {
+    // SAFETY: signal and tcsetpgrp are async-signal-safe, so this is also safe in pre_exec.
+    unsafe {
+        libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        libc::tcsetpgrp(0, pgid);
+        libc::signal(libc::SIGTTOU, libc::SIG_DFL);
+    }
 }
 
 fn exit_code(status: ExitStatus) -> i32 {
