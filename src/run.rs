@@ -1,6 +1,6 @@
 use std::env;
 use std::ffi::{CStr, OsStr, OsString};
-use std::io;
+use std::io::{self, IsTerminal};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -8,6 +8,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lexopt::prelude::*;
+use rustix::process::{Pid, Signal, getpgrp, getpid, kill_process_group};
+use rustix::termios::{tcgetpgrp, tcsetpgrp};
 
 use crate::config;
 use crate::feedback::{self, Notifier};
@@ -196,30 +198,28 @@ static CHILD_PGID: AtomicI32 = AtomicI32::new(0);
 
 // Runs the child in its own process group so a signal to henesys can reach the whole tree.
 fn spawn_and_wait(cmd: &mut Command) -> io::Result<ExitStatus> {
-    // SAFETY: these only read the tty state of stdin.
-    let tty = unsafe { libc::isatty(0) } == 1
-        && unsafe { libc::tcgetpgrp(0) } == unsafe { libc::getpgrp() };
+    let tty = std::io::stdin().is_terminal()
+        && tcgetpgrp(rustix::stdio::stdin()).is_ok_and(|g| g == getpgrp());
     cmd.process_group(0);
     if tty {
         // SAFETY: give_tty only calls async-signal-safe functions.
         unsafe {
             cmd.pre_exec(|| {
-                give_tty(libc::getpid());
+                give_tty(getpid());
                 Ok(())
             })
         };
     }
     let saved = forward_signals();
     let result = cmd.spawn().and_then(|mut child| {
-        let pid = child.id() as libc::pid_t;
-        CHILD_PGID.store(pid, Ordering::Relaxed);
+        let pid = Pid::from_child(&child);
+        CHILD_PGID.store(pid.as_raw_nonzero().get(), Ordering::Relaxed);
         if tty {
             give_tty(pid);
         }
         let status = child.wait();
         if tty {
-            // SAFETY: getpgrp cannot fail.
-            give_tty(unsafe { libc::getpgrp() });
+            give_tty(getpgrp());
         }
         status
     });
@@ -229,10 +229,12 @@ fn spawn_and_wait(cmd: &mut Command) -> io::Result<ExitStatus> {
 }
 
 extern "C" fn forward(sig: libc::c_int) {
-    let pgid = CHILD_PGID.load(Ordering::Relaxed);
-    if pgid != 0 {
-        // SAFETY: kill is async-signal-safe.
-        unsafe { libc::kill(-pgid, sig) };
+    // A zero CHILD_PGID is no child, and Pid::from_raw turns it into None.
+    if let (Some(pgid), Some(sig)) = (
+        Pid::from_raw(CHILD_PGID.load(Ordering::Relaxed)),
+        Signal::from_named_raw(sig),
+    ) {
+        let _ = kill_process_group(pgid, sig);
     }
 }
 
@@ -240,37 +242,46 @@ extern "C" fn forward(sig: libc::c_int) {
 fn forward_signals() -> Vec<(libc::c_int, libc::sigaction)> {
     let mut saved = Vec::new();
     for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
-        // SAFETY: zeroed sigaction structs are valid out-params and a valid handler is set.
-        unsafe {
-            let mut old: libc::sigaction = std::mem::zeroed();
-            libc::sigaction(sig, std::ptr::null(), &mut old);
-            if old.sa_sigaction == libc::SIG_IGN {
-                continue;
-            }
-            let mut act: libc::sigaction = std::mem::zeroed();
-            act.sa_sigaction = forward as *const () as libc::sighandler_t;
-            act.sa_flags = libc::SA_RESTART;
-            libc::sigaction(sig, &act, std::ptr::null_mut());
-            saved.push((sig, old));
+        let old = swap_action(sig, None);
+        if old.sa_sigaction == libc::SIG_IGN {
+            continue;
         }
+        let mut act = old;
+        act.sa_sigaction = forward as *const () as libc::sighandler_t;
+        act.sa_flags = libc::SA_RESTART;
+        swap_action(sig, Some(&act));
+        saved.push((sig, old));
     }
     saved
 }
 
 fn restore_signals(saved: &[(libc::c_int, libc::sigaction)]) {
     for (sig, old) in saved {
-        // SAFETY: `old` was filled in by sigaction above.
-        unsafe { libc::sigaction(*sig, old, std::ptr::null_mut()) };
+        swap_action(*sig, Some(old));
+    }
+}
+
+// Sets the action for `sig` to `new` when given, and returns the previous action.
+fn swap_action(sig: libc::c_int, new: Option<&libc::sigaction>) -> libc::sigaction {
+    // SAFETY: a zeroed sigaction is a valid out-param, and the kernel validates `sig`.
+    unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(
+            sig,
+            new.map_or(std::ptr::null(), |n| n as *const _),
+            &mut old,
+        );
+        old
     }
 }
 
 // Makes `pgid` the foreground group of the tty. A background process may not touch the tty
 // without SIGTTOU, so it is ignored around the call; both sides call this to avoid a race.
-fn give_tty(pgid: libc::pid_t) {
-    // SAFETY: signal and tcsetpgrp are async-signal-safe, so this is also safe in pre_exec.
+fn give_tty(pgid: Pid) {
+    // SAFETY: signal is async-signal-safe, so this is also safe in pre_exec.
     unsafe {
         libc::signal(libc::SIGTTOU, libc::SIG_IGN);
-        libc::tcsetpgrp(0, pgid);
+        let _ = tcsetpgrp(rustix::stdio::stdin(), pgid);
         libc::signal(libc::SIGTTOU, libc::SIG_DFL);
     }
 }
@@ -301,8 +312,7 @@ fn unix_now() -> Duration {
 // Supervisors find waiters with `pgrep -x henesys-wait`.
 #[cfg(target_os = "linux")]
 fn set_name(name: &CStr) {
-    // SAFETY: name is a valid NUL-terminated string that outlives the call.
-    unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr()) };
+    let _ = rustix::thread::set_name(name);
 }
 
 #[cfg(not(target_os = "linux"))]

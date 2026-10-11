@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -80,7 +80,7 @@ pub struct Notifier {
 impl Notifier {
     pub fn new() -> Notifier {
         Notifier {
-            tty: unsafe { libc::isatty(2) } == 1,
+            tty: std::io::stderr().is_terminal(),
             last: None,
             drawn: false,
         }
@@ -114,11 +114,9 @@ fn due(last: Option<Instant>, now: Instant) -> bool {
 }
 
 fn term_width() -> usize {
-    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-    if unsafe { libc::ioctl(2, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_col > 0 {
-        ws.ws_col as usize
-    } else {
-        80
+    match rustix::termios::tcgetwinsize(std::io::stderr()) {
+        Ok(ws) if ws.ws_col > 0 => ws.ws_col as usize,
+        _ => 80,
     }
 }
 

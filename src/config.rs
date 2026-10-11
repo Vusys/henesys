@@ -21,12 +21,10 @@ fn env_value(name: &str) -> Option<String> {
 }
 
 pub fn state_dir() -> PathBuf {
-    // SAFETY: getuid cannot fail.
-    let uid = unsafe { libc::getuid() };
     resolve_state_dir(
         env::var_os("HENESYS_DIR"),
         env::var_os("XDG_RUNTIME_DIR"),
-        uid,
+        rustix::process::getuid().as_raw(),
     )
 }
 

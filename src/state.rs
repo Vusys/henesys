@@ -34,8 +34,7 @@ impl State {
                 .create(&path)
                 .map_err(|e| io_err(&path, e))?;
         }
-        // SAFETY: geteuid cannot fail.
-        let uid = unsafe { libc::geteuid() };
+        let uid = rustix::process::geteuid().as_raw();
         // Only the predictable /tmp fallback can be planted by another user; a shared HENESYS_DIR is group-owned.
         if dir == Path::new(&format!("/tmp/henesys-{uid}")) {
             check_owner(&dir, uid)?;
@@ -299,8 +298,7 @@ mod tests {
     #[test]
     fn check_owner_accepts_own_dir_and_rejects_others() {
         let dir = tempfile::tempdir().unwrap();
-        // SAFETY: geteuid cannot fail.
-        let uid = unsafe { libc::geteuid() };
+        let uid = rustix::process::geteuid().as_raw();
         assert_eq!(check_owner(dir.path(), uid), Ok(()));
         assert!(check_owner(dir.path(), uid.wrapping_add(1)).is_err());
     }
