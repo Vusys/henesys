@@ -1,0 +1,18 @@
+[package]
+name = "henesys"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "Makes heavy commands on a shared machine wait their turn, and says what they are waiting behind."
+repository = "https://github.com/Vusys/henesys"
+
+[dependencies]
+lexopt = "0.3.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "s"
