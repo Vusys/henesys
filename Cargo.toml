@@ -9,6 +9,7 @@ repository = "https://github.com/Vusys/henesys"
 
 [dependencies]
 lexopt = "0.3.2"
+serde = { version = "1.0.229", features = ["derive"] }
 
 [profile.release]
 lto = true
